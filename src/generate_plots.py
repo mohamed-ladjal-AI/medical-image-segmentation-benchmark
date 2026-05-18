@@ -2,51 +2,29 @@
 src/generate_plots.py
 
 Publication-grade visualization suite for carotid plaque segmentation benchmarks.
-Generates five figure assets saved as high-DPI (300 DPI) PDFs in experiments/plots/.
 
-═══════════════════════════════════════════════════════════════════════════════
+TWO USAGE MODES
+───────────────
+A. Live in-training  (called from run_benchmark.py after every epoch)
+   plot_training_curves(model_name, epoch_logs, output_dir)
+   Writes two PDFs to <exp_dir>/plots/ and overwrites them each epoch so
+   you can watch training progress in real-time in any PDF viewer.
+
+B. Post-hoc CLI  (run after training is complete)
+   python -m src.generate_plots \\
+       --exp_dirs experiments/unet_run1 experiments/segformer_run1 \\
+       --test_results results/test_results.json
+
 DATA CONTRACTS
-═══════════════════════════════════════════════════════════════════════════════
+──────────────
+Training curves  ── Passed as in-memory lists (mode A) or read from
+                    TensorBoard event files (mode B).  Model name is
+                    recovered from <exp_dir>/run_args.json.
 
-Training curves  ──  Read from TensorBoard event files at <exp_dir>/tensorboard/.
-                     The model name is recovered from <exp_dir>/run_args.json,
-                     which run_benchmark.py writes automatically.
-
-Test-set results ──  A single JSON file whose top-level keys are model names and
-                     whose values are lists of per-subject metric dicts:
-                     {
-                       "<model_name>": [
-                         {
-                           "dice":          float,   # Dice Similarity Coefficient
-                           "iou":           float,   # Intersection over Union
-                           "hd95":          float,   # 95th-pct Hausdorff Distance (px)
-                           "nsd":           float,   # Normalised Surface Dice
-                           "fp_area":       float,   # False Positive Area (mm²)
-                           "gt_area_mm2":   float,   # Ground-truth plaque area (mm²)
-                           "pred_area_mm2": float    # Predicted plaque area (mm²)
-                         },
-                         ...
-                       ],
-                       ...
-                     }
-
-═══════════════════════════════════════════════════════════════════════════════
-USAGE
-═══════════════════════════════════════════════════════════════════════════════
-
-  # All five figures (training logs + test results):
-  python -m src.generate_plots \\
-      --exp_dirs  experiments/unet_run1 experiments/segformer_run1 \\
-      --test_results  results/test_results.json
-
-  # Only training-curve figures (Figs 1 & 2):
-  python -m src.generate_plots --exp_dirs experiments/unet_run1
-
-  # Only evaluation figures (Figs 3–5):
-  python -m src.generate_plots --test_results results/test_results.json
-
-  # Custom output directory:
-  python -m src.generate_plots ... --output_dir my_plots/
+Test-set results ── JSON file: { "<model_name>": [ {per-subject dict}, ... ] }
+                    Per-subject dict keys:
+                      dice, iou, hd95, nsd, fp_area,
+                      gt_area_mm2, pred_area_mm2
 """
 
 from __future__ import annotations
@@ -58,7 +36,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import matplotlib
-matplotlib.use("Agg")                     # non-interactive backend; must precede pyplot
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import numpy as np
@@ -68,22 +46,18 @@ import seaborn as sns
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 0.  GLOBAL STYLE & CONSTANTS
-#     Defined once, reused across every figure so all plots share identical
-#     colour assignments, display names, and typographic rules.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Canonical colour for each architecture — consistent across ALL five figures.
 PALETTE: Dict[str, str] = {
-    "unet":             "#4ECDC4",   # mint teal
-    "unet_plus_plus":   "#FF6B6B",   # coral red
-    "attention_unet":   "#4A90D9",   # steel blue
-    "deeplabv3_plus":   "#9B59B6",   # amethyst purple
-    "hrnet":            "#F39C12",   # amber
-    "segformer":        "#2ECC71",   # emerald green
-    "my_network":       "#E91E8C",   # fuchsia / magenta
+    "unet":             "#4ECDC4",
+    "unet_plus_plus":   "#FF6B6B",
+    "attention_unet":   "#4A90D9",
+    "deeplabv3_plus":   "#9B59B6",
+    "hrnet":            "#F39C12",
+    "segformer":        "#2ECC71",
+    "my_network":       "#E91E8C",
 }
 
-# Human-readable axis / legend labels for each architecture key.
 MODEL_DISPLAY: Dict[str, str] = {
     "unet":             "U-Net",
     "unet_plus_plus":   "U-Net++",
@@ -94,31 +68,28 @@ MODEL_DISPLAY: Dict[str, str] = {
     "my_network":       "My Network",
 }
 
-# Matplotlib rc-param overrides that give a clean, minimalist academic look.
-# Applied via _apply_style() at the start of every figure function so that
-# each figure is fully self-contained and unaffected by prior calls.
 _RC_PARAMS: Dict = {
-    "font.family":        "serif",
-    "font.serif":         ["Times New Roman", "DejaVu Serif", "Georgia", "serif"],
-    "axes.spines.top":    False,
-    "axes.spines.right":  False,
-    "axes.labelweight":   "bold",
-    "axes.titleweight":   "bold",
-    "axes.labelsize":     11,
-    "axes.titlesize":     13,
-    "axes.linewidth":     0.9,
-    "xtick.labelsize":    9,
-    "ytick.labelsize":    9,
-    "xtick.major.width":  0.9,
-    "ytick.major.width":  0.9,
-    "legend.fontsize":    9,
+    "font.family":           "serif",
+    "font.serif":            ["Times New Roman", "DejaVu Serif", "Georgia", "serif"],
+    "axes.spines.top":       False,
+    "axes.spines.right":     False,
+    "axes.labelweight":      "bold",
+    "axes.titleweight":      "bold",
+    "axes.labelsize":        11,
+    "axes.titlesize":        13,
+    "axes.linewidth":        0.9,
+    "xtick.labelsize":       9,
+    "ytick.labelsize":       9,
+    "xtick.major.width":     0.9,
+    "ytick.major.width":     0.9,
+    "legend.fontsize":       9,
     "legend.title_fontsize": 9,
-    "legend.frameon":     False,
-    "legend.borderpad":   0.4,
-    "figure.dpi":         100,    # interactive preview quality
-    "savefig.dpi":        300,    # hard-copy output quality
-    "savefig.bbox":       "tight",
-    "savefig.pad_inches": 0.05,
+    "legend.frameon":        False,
+    "legend.borderpad":      0.4,
+    "figure.dpi":            100,
+    "savefig.dpi":           300,
+    "savefig.bbox":          "tight",
+    "savefig.pad_inches":    0.05,
 }
 
 _DPI_SAVE = 300
@@ -126,61 +97,172 @@ _FIG_EXT  = ".pdf"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 0a.  STYLE HELPERS  (private — not part of the public API)
+# 0a.  PRIVATE STYLE HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _apply_style() -> None:
-    """Reset matplotlib/seaborn state and apply the shared academic theme."""
     sns.set_theme(style="ticks", rc=_RC_PARAMS)
 
-
 def _label(key: str) -> str:
-    """Return the display name for a model key."""
     return MODEL_DISPLAY.get(key, key.replace("_", " ").title())
 
-
 def _color(key: str) -> str:
-    """Return the canonical hex colour for a model key."""
     return PALETTE.get(key, "#888888")
 
-
-def _save(fig: plt.Figure, path: Path) -> None:
-    """Save a figure at publication DPI and close it."""
+def _save(fig: plt.Figure, path: Path, *, verbose: bool = False) -> None:
     fig.savefig(path, dpi=_DPI_SAVE)
     plt.close(fig)
-    print(f"  ✓  Saved  {path}")
+    if verbose:
+        print(f"  ✓  Saved  {path}")
+
+def _mark_best(
+    ax: plt.Axes,
+    epochs: List[int],
+    vals: List[float],
+    higher_is_better: bool,
+    color: str,
+) -> None:
+    """Vertical guide-line + filled dot at the best epoch."""
+    best_idx = int(np.argmax(vals) if higher_is_better else np.argmin(vals))
+    ax.axvline(epochs[best_idx], color="#AAAAAA", lw=1.0, ls=":", alpha=0.8, zorder=1)
+    ax.scatter([epochs[best_idx]], [vals[best_idx]],
+               color=color, s=55, zorder=5, edgecolors="white", linewidths=1.3)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1.  DATA LOADERS
+# 1.  LIVE IN-TRAINING PLOTS
+#     Called by run_benchmark.py after every epoch.
+#     Overwrites fixed filenames so a PDF viewer can be refreshed in real-time.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _load_tb_scalar(
-    tb_dir: Path,
-    tag: str,
-) -> Tuple[List[int], List[float]]:
+def plot_training_curves(
+    model_name: str,
+    epoch_logs: Dict[str, List[float]],
+    output_dir: Path,
+) -> None:
     """
-    Read a single scalar time-series from a TensorBoard event directory.
+    Regenerate and overwrite the two live training-progress figures.
 
     Parameters
     ----------
-    tb_dir : directory containing TensorBoard event files
-    tag    : TensorBoard scalar tag, e.g. 'loss/train'
+    model_name  : architecture key, e.g. ``"unet"``.
+    epoch_logs  : dict of metric name → list of per-epoch scalars.
+                  Expected keys:
+                    ``train_loss``, ``val_loss``,
+                    ``val_dice``, ``val_iou``, ``val_hd95``, ``val_nsd``,
+                    ``val_fp_area``, ``val_plaque_area_err``
+    output_dir  : destination folder, usually ``<exp_dir>/plots/``.
+                  Created automatically if absent.
 
-    Returns
-    -------
-    (steps, values) — both empty lists if the tag or directory is absent.
+    Output files (overwritten every epoch)
+    ---------------------------------------
+    fig1_convergence.pdf        — Train vs. Val loss with best-epoch marker
+    fig2_metrics_dashboard.pdf  — 2×3 grid of all tracked val metrics
     """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    color      = _color(model_name)
+    arch_label = _label(model_name)
+    n_epochs   = len(epoch_logs.get("train_loss", []))
+
+    if n_epochs == 0:
+        return
+
+    epochs = list(range(1, n_epochs + 1))
+
+    # ── Fig 1 — Convergence Dynamics ─────────────────────────────────────
+    _apply_style()
+    fig, ax = plt.subplots(figsize=(8.0, 4.6))
+
+    train_loss = epoch_logs.get("train_loss", [])
+    val_loss   = epoch_logs.get("val_loss",   [])
+
+    if train_loss:
+        ax.plot(epochs, train_loss, color=color, lw=1.9, ls="-",  label="Train Loss")
+    if val_loss:
+        ax.plot(epochs, val_loss,   color=color, lw=1.9, ls="--", label="Val Loss")
+        _mark_best(ax, epochs, val_loss, higher_is_better=False, color=color)
+        best_ep  = epochs[int(np.argmin(val_loss))]
+        best_val = float(np.min(val_loss))
+        ax.text(best_ep, best_val, f"  best (ep {best_ep})",
+                fontsize=7.5, color="#555555", va="bottom", ha="left")
+
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.set_title(f"Convergence Dynamics — {arch_label}  (Epoch {n_epochs})")
+    ax.legend(loc="upper right")
+    sns.despine(fig=fig, ax=ax)
+    _save(fig, output_dir / f"fig1_convergence{_FIG_EXT}")
+
+    # ── Fig 2 — Validation Metrics Dashboard ─────────────────────────────
+    _apply_style()
+
+    # Each tuple: (epoch_logs key, y-axis label, higher_is_better)
+    all_panels = [
+        ("val_dice",            "Dice (DSC)",              True),
+        ("val_iou",             "IoU",                     True),
+        ("val_hd95",            "HD95 (px)",               False),
+        ("val_nsd",             "Normalised Surface Dice", True),
+        ("val_fp_area",         "Median FP Area (mm²)",    False),
+        ("val_plaque_area_err", "Mean Plaque Area Err.",   False),
+    ]
+    active = [(k, lbl, up) for k, lbl, up in all_panels if epoch_logs.get(k)]
+
+    if not active:
+        return
+
+    n_cols = min(3, len(active))
+    n_rows = int(np.ceil(len(active) / n_cols))
+
+    fig, axes = plt.subplots(
+        n_rows, n_cols,
+        figsize=(5.4 * n_cols, 3.8 * n_rows),
+        squeeze=False,
+    )
+
+    for idx, (key, ylabel, higher_is_better) in enumerate(active):
+        row, col = divmod(idx, n_cols)
+        ax       = axes[row][col]
+        vals     = epoch_logs[key]
+
+        ax.plot(epochs, vals, color=color, lw=1.9)
+        _mark_best(ax, epochs, vals, higher_is_better, color)
+
+        ax.text(0.98, 0.96, f"latest: {vals[-1]:.4f}",
+                transform=ax.transAxes, fontsize=7.5, color="#333333",
+                ha="right", va="top")
+        ax.text(0.98, 0.04,
+                "↑ higher is better" if higher_is_better else "↓ lower is better",
+                transform=ax.transAxes, fontsize=7, color="#999999",
+                ha="right", va="bottom")
+
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel(ylabel)
+        ax.set_title(ylabel)
+        sns.despine(fig=fig, ax=ax)
+
+    for idx in range(len(active), n_rows * n_cols):
+        row, col = divmod(idx, n_cols)
+        axes[row][col].set_visible(False)
+
+    fig.suptitle(
+        f"Validation Metrics Dashboard — {arch_label}  (Epoch {n_epochs})",
+        fontsize=13, fontweight="bold",
+    )
+    fig.tight_layout()
+    _save(fig, output_dir / f"fig2_metrics_dashboard{_FIG_EXT}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2.  DATA LOADERS  (post-hoc CLI only)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _load_tb_scalar(tb_dir: Path, tag: str) -> Tuple[List[int], List[float]]:
     try:
-        from tensorboard.backend.event_processing.event_accumulator import (
-            EventAccumulator,
-        )
+        from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
     except ImportError:
-        warnings.warn(
-            "The 'tensorboard' package is required to read training logs.\n"
-            "Install it with:  pip install tensorboard",
-            stacklevel=3,
-        )
+        warnings.warn("Install tensorboard:  pip install tensorboard", stacklevel=3)
         return [], []
 
     if not tb_dir.exists():
@@ -197,490 +279,196 @@ def _load_tb_scalar(
 
 
 def load_run_data(exp_dirs: List[str]) -> Dict[str, Dict]:
-    """
-    Parse TensorBoard event logs for a list of experiment directories.
-
-    Each directory must contain:
-      - run_args.json   (written by run_benchmark.py; supplies the model name)
-      - tensorboard/    (TensorBoard event files)
-
-    Returns
-    -------
-    dict  keyed by model name →
-          {
-            "loss_train": (steps, values),
-            "loss_val":   (steps, values),
-            "val_dice":   (steps, values),
-          }
-    """
     run_data: Dict[str, Dict] = {}
-
     for raw_dir in exp_dirs:
-        exp_dir       = Path(raw_dir)
+        exp_dir = Path(raw_dir)
         run_args_path = exp_dir / "run_args.json"
-
         if not run_args_path.exists():
-            warnings.warn(f"No run_args.json in '{exp_dir}'; skipping this directory.")
+            warnings.warn(f"No run_args.json in '{exp_dir}'; skipping.")
             continue
-
         with open(run_args_path) as fh:
             run_args = json.load(fh)
-
         model_name = run_args.get("model", exp_dir.name)
         tb_dir     = exp_dir / "tensorboard"
-
         run_data[model_name] = {
             "loss_train": _load_tb_scalar(tb_dir, "loss/train"),
             "loss_val":   _load_tb_scalar(tb_dir, "loss/val"),
             "val_dice":   _load_tb_scalar(tb_dir, "metrics/mean_dice"),
         }
         print(f"  ✓  Loaded training curves for '{model_name}'  ←  {exp_dir}")
-
     return run_data
 
 
 def load_test_data(json_path: str) -> Dict[str, List[Dict]]:
-    """
-    Load per-subject test-set results from a JSON file.
-
-    See module docstring for the expected schema.
-
-    Returns
-    -------
-    dict  keyed by model name → list of per-subject metric dicts.
-    """
     path = Path(json_path)
     if not path.exists():
         raise FileNotFoundError(f"Test-results file not found: {path}")
-
     with open(path) as fh:
         data = json.load(fh)
-
     print(f"  ✓  Loaded test results for models: {list(data.keys())}")
     return data
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2.  FIGURE GENERATORS
+# 3.  POST-HOC FIGURE GENERATORS  (CLI / final publication plots)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ── Figure 1 ─────────────────────────────────────────────────────────────────
-
-def fig1_convergence_dynamics(
-    run_data: Dict[str, Dict],
-    output_dir: Path,
-) -> None:
-    """
-    Figure 1 — Convergence Dynamics.
-
-    A single axes showing Train loss (solid line) and Validation loss
-    (dashed line) for every model.  Matching colours identify the same
-    architecture; a two-section legend separates model identity from
-    line-style semantics.
-    """
+def fig1_convergence_dynamics(run_data: Dict[str, Dict], output_dir: Path) -> None:
     _apply_style()
     fig, ax = plt.subplots(figsize=(8.5, 4.8))
-
-    model_patches: List[mpatches.Patch] = []
-
+    patches = []
     for model_name, curves in run_data.items():
         color = _color(model_name)
-        label = _label(model_name)
-
-        train_steps, train_vals = curves["loss_train"]
-        val_steps,   val_vals   = curves["loss_val"]
-
-        if train_steps:
-            ax.plot(
-                train_steps, train_vals,
-                color=color, linewidth=1.9, linestyle="-", alpha=0.92,
-            )
-        if val_steps:
-            ax.plot(
-                val_steps, val_vals,
-                color=color, linewidth=1.9, linestyle="--", alpha=0.92,
-            )
-
-        model_patches.append(mpatches.Patch(facecolor=color, label=label))
-
-    # Line-style legend (shared across all models)
-    style_handles = [
-        plt.Line2D([0], [0], color="#555555", lw=2.0, ls="-",  label="Train"),
-        plt.Line2D([0], [0], color="#555555", lw=2.0, ls="--", label="Validation"),
-    ]
-
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Loss")
+        steps_t, vals_t = curves["loss_train"]
+        steps_v, vals_v = curves["loss_val"]
+        if steps_t:
+            ax.plot(steps_t, vals_t, color=color, lw=1.9, ls="-",  alpha=0.92)
+        if steps_v:
+            ax.plot(steps_v, vals_v, color=color, lw=1.9, ls="--", alpha=0.92)
+        patches.append(mpatches.Patch(facecolor=color, label=_label(model_name)))
+    style_h = [plt.Line2D([0],[0], color="#555",lw=2,ls="-", label="Train"),
+               plt.Line2D([0],[0], color="#555",lw=2,ls="--",label="Validation")]
+    ax.set_xlabel("Epoch"); ax.set_ylabel("Loss")
     ax.set_title("Figure 1 — Convergence Dynamics: Training vs. Validation Loss")
-
-    # Primary legend: one swatch per architecture
-    legend_arch = ax.legend(
-        handles=model_patches,
-        title="Architecture",
-        bbox_to_anchor=(1.02, 1.0),
-        loc="upper left",
-        borderaxespad=0,
-    )
-    ax.add_artist(legend_arch)
-
-    # Secondary legend: solid = train, dashed = validation
-    ax.legend(
-        handles=style_handles,
-        title="Data Split",
-        bbox_to_anchor=(1.02, 0.45),
-        loc="upper left",
-        borderaxespad=0,
-    )
-
+    l1 = ax.legend(handles=patches, title="Architecture",
+                   bbox_to_anchor=(1.02,1.0), loc="upper left", borderaxespad=0)
+    ax.add_artist(l1)
+    ax.legend(handles=style_h, title="Data Split",
+              bbox_to_anchor=(1.02,0.45), loc="upper left", borderaxespad=0)
     sns.despine(fig=fig, ax=ax)
-    _save(fig, output_dir / f"fig1_convergence_dynamics{_FIG_EXT}")
+    _save(fig, output_dir / f"fig1_convergence_dynamics{_FIG_EXT}", verbose=True)
 
 
-# ── Figure 2 ─────────────────────────────────────────────────────────────────
-
-def fig2_generalization_race(
-    run_data: Dict[str, Dict],
-    output_dir: Path,
-) -> None:
-    """
-    Figure 2 — Generalization Race.
-
-    Validation Dice progression across all epochs for every model on a
-    shared axes.  Reveals which architecture learns fastest and which
-    reaches the highest plateau.
-    """
+def fig2_generalization_race(run_data: Dict[str, Dict], output_dir: Path) -> None:
     _apply_style()
     fig, ax = plt.subplots(figsize=(8.5, 4.8))
-
-    any_plotted = False
     for model_name, curves in run_data.items():
         steps, vals = curves["val_dice"]
-        if not steps:
-            continue
-        ax.plot(
-            steps, vals,
-            color=_color(model_name),
-            linewidth=2.1,
-            label=_label(model_name),
-        )
-        any_plotted = True
-
-    if not any_plotted:
-        warnings.warn("No val_dice series found in run_data; Figure 2 will be empty.")
-
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Validation Dice (DSC)")
+        if steps:
+            ax.plot(steps, vals, color=_color(model_name), lw=2.1, label=_label(model_name))
+    ax.set_xlabel("Epoch"); ax.set_ylabel("Validation Dice (DSC)")
     ax.set_title("Figure 2 — Generalization Race: Validation Dice Progression")
-    ax.set_ylim(bottom=0.0, top=1.0)
-
-    ax.legend(
-        title="Architecture",
-        bbox_to_anchor=(1.02, 1.0),
-        loc="upper left",
-        borderaxespad=0,
-    )
-
+    ax.set_ylim(0.0, 1.0)
+    ax.legend(title="Architecture", bbox_to_anchor=(1.02,1.0), loc="upper left", borderaxespad=0)
     sns.despine(fig=fig, ax=ax)
-    _save(fig, output_dir / f"fig2_generalization_race{_FIG_EXT}")
+    _save(fig, output_dir / f"fig2_generalization_race{_FIG_EXT}", verbose=True)
 
 
-# ── Figure 3 ─────────────────────────────────────────────────────────────────
-
-def fig3_robustness_profile(
-    test_data: Dict[str, List[Dict]],
-    output_dir: Path,
-) -> None:
-    """
-    Figure 3 — Robustness Profile.
-
-    Combined Violin + Box + Jittered Strip plot of per-subject DSC for
-    each model.  The violin captures distributional shape; the narrow
-    white box marks the IQR and median; individual patient dots expose
-    outliers and variance.
-    """
+def fig3_robustness_profile(test_data: Dict[str, List[Dict]], output_dir: Path) -> None:
     _apply_style()
-
-    # ── Build long-form DataFrame ────────────────────────────────────────
-    rows = []
-    for model_name, records in test_data.items():
-        for r in records:
-            d = r.get("dice", np.nan)
-            if not np.isnan(d):
-                rows.append({"model": model_name, "dice": float(d)})
-
+    rows = [{"model": m, "dice": float(r["dice"])}
+            for m, recs in test_data.items() for r in recs
+            if not np.isnan(r.get("dice", np.nan))]
     if not rows:
-        warnings.warn("No valid Dice scores in test data; skipping Figure 3.")
-        return
+        warnings.warn("No valid Dice scores; skipping Figure 3."); return
 
     df = pd.DataFrame(rows)
+    model_order = [m for m in PALETTE if m in df["model"].unique()]
+    fig, ax = plt.subplots(figsize=(max(6.5, len(model_order) * 1.7), 5.2))
 
-    # Preserve canonical PALETTE order; skip models absent from this run
-    model_order    = [m for m in PALETTE if m in df["model"].unique()]
-    display_labels = [_label(m)  for m in model_order]
-    palette_list   = [_color(m)  for m in model_order]
-    n_models       = len(model_order)
+    sns.violinplot(data=df, x="model", y="dice", order=model_order,
+                   palette=[_color(m) for m in model_order],
+                   inner=None, linewidth=0.7, cut=0, ax=ax)
+    for i, m in enumerate(model_order):
+        vals = df.loc[df["model"] == m, "dice"].values
+        if vals.size:
+            ax.boxplot(vals, positions=[i], widths=0.11, showfliers=False,
+                       patch_artist=True, zorder=4,
+                       medianprops=dict(color="#111", linewidth=2.2),
+                       boxprops=dict(facecolor="white", linewidth=1.2),
+                       whiskerprops=dict(linewidth=1.2), capprops=dict(linewidth=1.2))
+    sns.stripplot(data=df, x="model", y="dice", order=model_order,
+                  color="#1A1A1A", alpha=0.28, size=3.8, jitter=True, zorder=3, ax=ax)
 
-    fig, ax = plt.subplots(figsize=(max(6.5, n_models * 1.7), 5.2))
-
-    # 1. Violin — full distributional shape
-    sns.violinplot(
-        data=df, x="model", y="dice",
-        order=model_order,
-        palette=palette_list,
-        inner=None,
-        linewidth=0.7,
-        cut=0,
-        ax=ax,
-    )
-
-    # 2. Narrow box — IQR, median, whiskers (drawn in matplotlib for
-    #    version-safe rendering on top of the violin)
-    for i, model_name in enumerate(model_order):
-        vals = df.loc[df["model"] == model_name, "dice"].values
-        if vals.size == 0:
-            continue
-        bp = ax.boxplot(
-            vals,
-            positions=[i],
-            widths=0.11,
-            showfliers=False,
-            patch_artist=True,
-            zorder=4,
-            medianprops=dict(color="#111111", linewidth=2.2),
-            boxprops=dict(facecolor="white",  linewidth=1.2),
-            whiskerprops=dict(linewidth=1.2,  linestyle="-"),
-            capprops=dict(linewidth=1.2),
-        )
-
-    # 3. Strip — raw patient-level observations
-    sns.stripplot(
-        data=df, x="model", y="dice",
-        order=model_order,
-        color="#1A1A1A",
-        alpha=0.28,
-        size=3.8,
-        jitter=True,
-        zorder=3,
-        ax=ax,
-    )
-
-    ax.set_xticklabels(display_labels, rotation=22, ha="right")
-    ax.set_xlabel("Architecture")
-    ax.set_ylabel("Dice Similarity Coefficient (DSC)")
+    ax.set_xticklabels([_label(m) for m in model_order], rotation=22, ha="right")
+    ax.set_xlabel("Architecture"); ax.set_ylabel("Dice Similarity Coefficient (DSC)")
     ax.set_title("Figure 3 — Robustness Profile: Subject-wise DSC Distribution")
     ax.set_ylim(0.0, 1.05)
-
-    sns.despine(fig=fig, ax=ax)
-    fig.tight_layout()
-    _save(fig, output_dir / f"fig3_robustness_profile{_FIG_EXT}")
+    sns.despine(fig=fig, ax=ax); fig.tight_layout()
+    _save(fig, output_dir / f"fig3_robustness_profile{_FIG_EXT}", verbose=True)
 
 
-# ── Figure 4 ─────────────────────────────────────────────────────────────────
-
-def fig4_geometric_scatter(
-    test_data: Dict[str, List[Dict]],
-    output_dir: Path,
-) -> None:
-    """
-    Figure 4 — Geometric Scatter.
-
-    2-D domain analysis: per-subject Dice on the X-axis against HD95
-    on the Y-axis.  Colour identifies the architecture.  An annotated
-    callout marks the bottom-right "Ideal Zone" (high overlap, low
-    boundary error).
-
-    Subjects where HD95 is infinite (model predicted nothing / predicted
-    everything on a plaque-containing slice) are silently excluded.
-    """
+def fig4_geometric_scatter(test_data: Dict[str, List[Dict]], output_dir: Path) -> None:
     _apply_style()
     fig, ax = plt.subplots(figsize=(7.5, 5.8))
-
-    legend_handles: List[plt.Line2D] = []
-
+    handles = []
     for model_name, records in test_data.items():
-        pairs = [
-            (r["dice"], r["hd95"])
-            for r in records
-            if not np.isnan(r.get("dice", np.nan))
-            and not np.isnan(r.get("hd95", np.nan))
-            and not np.isinf(r.get("hd95", np.inf))
-        ]
-        if not pairs:
-            continue
-
+        pairs = [(r["dice"], r["hd95"]) for r in records
+                 if not np.isnan(r.get("dice", np.nan))
+                 and not np.isnan(r.get("hd95", np.nan))
+                 and not np.isinf(r.get("hd95", np.inf))]
+        if not pairs: continue
         dices, hd95s = zip(*pairs)
         color = _color(model_name)
-
-        ax.scatter(
-            dices, hd95s,
-            color=color, alpha=0.55, s=52,
-            edgecolors="white", linewidths=0.4,
-            zorder=3,
-        )
-        legend_handles.append(
-            plt.Line2D(
-                [0], [0], marker="o", color="w",
-                markerfacecolor=color, markersize=9,
-                label=_label(model_name),
-            )
-        )
-
-    # ── "Ideal Zone" annotation ──────────────────────────────────────────
-    # Target: bottom-right corner in axes-fraction space
-    # (high Dice → right,  low HD95 → bottom)
-    ax.annotate(
-        "Ideal Zone\n(High Overlap · Low Boundary Error)",
-        xy=(0.96, 0.04),
-        xycoords="axes fraction",
-        xytext=(0.60, 0.28),
-        textcoords="axes fraction",
-        arrowprops=dict(
-            arrowstyle="->",
-            color="#444444",
-            lw=1.5,
-            connectionstyle="arc3,rad=-0.25",
-        ),
-        fontsize=8.5,
-        color="#333333",
-        ha="center",
-        va="top",
-        bbox=dict(
-            boxstyle="round,pad=0.35",
-            facecolor="#F7F7F7",
-            edgecolor="#BBBBBB",
-            linewidth=0.8,
-        ),
-    )
-
+        ax.scatter(dices, hd95s, color=color, alpha=0.55, s=52,
+                   edgecolors="white", linewidths=0.4, zorder=3)
+        handles.append(plt.Line2D([0],[0], marker="o", color="w",
+                                  markerfacecolor=color, markersize=9, label=_label(model_name)))
+    ax.annotate("Ideal Zone\n(High Overlap · Low Boundary Error)",
+                xy=(0.96,0.04), xycoords="axes fraction",
+                xytext=(0.60,0.28), textcoords="axes fraction",
+                arrowprops=dict(arrowstyle="->", color="#444", lw=1.5,
+                                connectionstyle="arc3,rad=-0.25"),
+                fontsize=8.5, color="#333", ha="center", va="top",
+                bbox=dict(boxstyle="round,pad=0.35", facecolor="#F7F7F7",
+                          edgecolor="#BBB", linewidth=0.8))
     ax.set_xlabel("Dice Similarity Coefficient (DSC)  ←  higher is better")
     ax.set_ylabel("95% Hausdorff Distance (HD95, px)  ←  lower is better")
     ax.set_title("Figure 4 — Geometric Scatter: Overlap Fidelity vs. Boundary Error")
-
-    ax.legend(
-        handles=legend_handles,
-        title="Architecture",
-        bbox_to_anchor=(1.02, 1.0),
-        loc="upper left",
-        borderaxespad=0,
-    )
-
+    ax.legend(handles=handles, title="Architecture",
+              bbox_to_anchor=(1.02,1.0), loc="upper left", borderaxespad=0)
     sns.despine(fig=fig, ax=ax)
-    _save(fig, output_dir / f"fig4_geometric_scatter{_FIG_EXT}")
+    _save(fig, output_dir / f"fig4_geometric_scatter{_FIG_EXT}", verbose=True)
 
 
-# ── Figure 5 ─────────────────────────────────────────────────────────────────
-
-def fig5_area_quantification(
-    test_data: Dict[str, List[Dict]],
-    output_dir: Path,
-) -> None:
-    """
-    Figure 5 — Clinical Area Quantification (multi-panel grid).
-
-    One sub-panel per model: Ground Truth Area (X) vs. Predicted Area (Y).
-    A dotted y = x identity line acts as a zero-drift reference; points
-    above the line represent over-segmentation and points below represent
-    under-segmentation.
-    """
+def fig5_area_quantification(test_data: Dict[str, List[Dict]], output_dir: Path) -> None:
     _apply_style()
-
-    # Only include models that have at least one valid area measurement
-    models = [
-        m for m in test_data
-        if any(
-            not np.isnan(r.get("gt_area_mm2", np.nan))
-            and not np.isnan(r.get("pred_area_mm2", np.nan))
-            for r in test_data[m]
-        )
-    ]
-
+    models = [m for m in test_data
+              if any(not np.isnan(r.get("gt_area_mm2", np.nan))
+                     and not np.isnan(r.get("pred_area_mm2", np.nan))
+                     for r in test_data[m])]
     if not models:
-        warnings.warn(
-            "No gt_area_mm2 / pred_area_mm2 fields found; skipping Figure 5.\n"
-            "Ensure your test JSON contains 'gt_area_mm2' and 'pred_area_mm2'."
-        )
-        return
+        warnings.warn("No area fields found; skipping Figure 5."); return
 
-    n       = len(models)
-    n_cols  = min(3, n)
-    n_rows  = int(np.ceil(n / n_cols))
-
-    fig, axes = plt.subplots(
-        n_rows, n_cols,
-        figsize=(5.2 * n_cols, 4.8 * n_rows),
-        squeeze=False,
-    )
+    n_cols = min(3, len(models))
+    n_rows = int(np.ceil(len(models) / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols,
+                             figsize=(5.2*n_cols, 4.8*n_rows), squeeze=False)
 
     for idx, model_name in enumerate(models):
         row, col = divmod(idx, n_cols)
         ax = axes[row][col]
+        gt   = np.array([r.get("gt_area_mm2",   np.nan) for r in test_data[model_name]])
+        pred = np.array([r.get("pred_area_mm2",  np.nan) for r in test_data[model_name]])
+        mask = ~np.isnan(gt) & ~np.isnan(pred)
+        gt, pred = gt[mask], pred[mask]
+        if gt.size == 0: ax.set_visible(False); continue
 
-        records   = test_data[model_name]
-        gt_vals   = np.array([r.get("gt_area_mm2",   np.nan) for r in records])
-        pred_vals = np.array([r.get("pred_area_mm2",  np.nan) for r in records])
-
-        # Filter rows where either value is NaN
-        valid_mask = ~np.isnan(gt_vals) & ~np.isnan(pred_vals)
-        gt_arr     = gt_vals[valid_mask]
-        pred_arr   = pred_vals[valid_mask]
-
-        if gt_arr.size == 0:
-            ax.set_visible(False)
-            continue
-
-        # ── Scatter ──────────────────────────────────────────────────────
-        ax.scatter(
-            gt_arr, pred_arr,
-            color=_color(model_name),
-            alpha=0.60, s=48,
-            edgecolors="white", linewidths=0.4,
-            zorder=3,
-        )
-
-        # ── y = x identity reference line (dotted) ───────────────────────
-        pad       = 0.04
-        lo        = min(gt_arr.min(), pred_arr.min()) * (1 - pad)
-        hi        = max(gt_arr.max(), pred_arr.max()) * (1 + pad)
-        ref_range = np.array([lo, hi])
-
-        ax.plot(
-            ref_range, ref_range,
-            linestyle=":",
-            color="#555555",
-            linewidth=1.6,
-            alpha=0.85,
-            zorder=2,
-            label="y = x  (perfect agreement)",
-        )
-
-        ax.set_xlim(lo, hi)
-        ax.set_ylim(lo, hi)
-        ax.set_aspect("equal", adjustable="box")
-
+        ax.scatter(gt, pred, color=_color(model_name), alpha=0.60, s=48,
+                   edgecolors="white", linewidths=0.4, zorder=3)
+        pad = 0.04
+        lo = min(gt.min(), pred.min()) * (1 - pad)
+        hi = max(gt.max(), pred.max()) * (1 + pad)
+        ax.plot([lo,hi],[lo,hi], ls=":", color="#555", lw=1.6, alpha=0.85, zorder=2,
+                label="y = x  (perfect)")
+        ax.set_xlim(lo,hi); ax.set_ylim(lo,hi); ax.set_aspect("equal", adjustable="box")
         ax.set_title(_label(model_name))
-        ax.set_xlabel("Ground Truth Area (mm²)")
-        ax.set_ylabel("Predicted Area (mm²)")
+        ax.set_xlabel("Ground Truth Area (mm²)"); ax.set_ylabel("Predicted Area (mm²)")
         ax.legend(fontsize=7.5, loc="upper left")
-
         sns.despine(fig=fig, ax=ax)
 
-    # ── Hide surplus panels ───────────────────────────────────────────────
-    for idx in range(n, n_rows * n_cols):
+    for idx in range(len(models), n_rows * n_cols):
         row, col = divmod(idx, n_cols)
         axes[row][col].set_visible(False)
 
-    fig.suptitle(
-        "Figure 5 — Clinical Area Quantification: GT vs. Predicted Plaque Area",
-        fontsize=14,
-        fontweight="bold",
-        y=1.01,
-    )
+    fig.suptitle("Figure 5 — Clinical Area Quantification: GT vs. Predicted Plaque Area",
+                 fontsize=14, fontweight="bold", y=1.01)
     fig.tight_layout()
-    _save(fig, output_dir / f"fig5_area_quantification{_FIG_EXT}")
+    _save(fig, output_dir / f"fig5_area_quantification{_FIG_EXT}", verbose=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3.  ORCHESTRATOR
+# 4.  ORCHESTRATOR & CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
 def generate_all_plots(
@@ -688,114 +476,46 @@ def generate_all_plots(
     test_results_path: Optional[str] = None,
     output_dir: str = "experiments/plots",
 ) -> None:
-    """
-    Load all data sources and generate the full five-figure suite.
-
-    Parameters
-    ----------
-    exp_dirs           List of paths to experiment directories written by
-                       run_benchmark.py.  Required for Figures 1 & 2.
-    test_results_path  Path to the per-subject test-results JSON.
-                       Required for Figures 3, 4 & 5.
-    output_dir         Destination directory for PDF figures.
-                       Created automatically if it does not exist.
-    """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    print(f"\n📂  Output directory : {out.resolve()}\n{'─' * 60}")
+    print(f"\n📂  Output directory : {out.resolve()}\n{'─'*60}")
 
     run_data:  Dict[str, Dict]       = {}
     test_data: Dict[str, List[Dict]] = {}
 
-    # ── Load training-log data ────────────────────────────────────────────
     if exp_dirs:
         print("🔄  Parsing TensorBoard logs …")
-        run_data = load_run_data(exp_dirs)
-        print()
-
-    # ── Load test-set results ─────────────────────────────────────────────
+        run_data = load_run_data(exp_dirs); print()
     if test_results_path:
         print("🔄  Loading test-set results …")
-        test_data = load_test_data(test_results_path)
-        print()
+        test_data = load_test_data(test_results_path); print()
 
-    # ── Render figures ────────────────────────────────────────────────────
     print("🎨  Rendering figures …\n")
-
     generated = 0
-
     if run_data:
         fig1_convergence_dynamics(run_data, out)
         fig2_generalization_race(run_data, out)
         generated += 2
-
     if test_data:
         fig3_robustness_profile(test_data, out)
         fig4_geometric_scatter(test_data, out)
         fig5_area_quantification(test_data, out)
         generated += 3
 
-    skipped = 5 - generated
-    print(f"\n{'─' * 60}")
+    print(f"\n{'─'*60}")
     print(f"✅  Done — {generated}/5 figures saved to: {out.resolve()}")
-    if skipped:
-        print(
-            f"   ⚠️   {skipped} figure(s) skipped "
-            f"({'--exp_dirs missing' if not run_data else ''}"
-            f"{'--test_results missing' if not test_data else ''})."
-        )
+    if 5 - generated:
+        print(f"   ⚠️   {5-generated} figure(s) skipped (missing data source).")
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 4.  CLI ENTRY POINT
-# ─────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        prog="src.generate_plots",
-        description=(
-            "Generate publication-grade segmentation benchmark plots.\n"
-            "Outputs five high-DPI PDF figures to experiments/plots/ (or --output_dir)."
-        ),
-        formatter_class=argparse.RawTextHelpFormatter,
-    )
-    parser.add_argument(
-        "--exp_dirs",
-        nargs="+",
-        default=[],
-        metavar="DIR",
-        help=(
-            "One or more experiment directories produced by run_benchmark.py.\n"
-            "Each must contain run_args.json and a tensorboard/ sub-folder.\n"
-            "Required for Figures 1 (loss curves) and 2 (dice progression)."
-        ),
-    )
-    parser.add_argument(
-        "--test_results",
-        type=str,
-        default="",
-        metavar="FILE",
-        help=(
-            "Path to a JSON file with per-subject test-set metrics.\n"
-            "Schema: { '<model>': [{dice, iou, hd95, nsd, fp_area,\n"
-            "         gt_area_mm2, pred_area_mm2}, ...], ... }\n"
-            "Required for Figures 3 (violin), 4 (scatter), and 5 (area grid)."
-        ),
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="experiments/plots",
-        metavar="DIR",
-        help="Destination directory for all PDF outputs.  (default: experiments/plots)",
-    )
+    parser = argparse.ArgumentParser(prog="src.generate_plots",
+        description="Generate publication-grade segmentation benchmark plots.")
+    parser.add_argument("--exp_dirs",     nargs="+", default=[], metavar="DIR")
+    parser.add_argument("--test_results", type=str,  default="",  metavar="FILE")
+    parser.add_argument("--output_dir",   type=str,  default="experiments/plots", metavar="DIR")
     args = parser.parse_args()
-
-    generate_all_plots(
-        exp_dirs          = args.exp_dirs       or None,
-        test_results_path = args.test_results   or None,
-        output_dir        = args.output_dir,
-    )
+    generate_all_plots(args.exp_dirs or None, args.test_results or None, args.output_dir)
 
 
 if __name__ == "__main__":
