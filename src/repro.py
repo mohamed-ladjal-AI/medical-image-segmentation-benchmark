@@ -45,14 +45,23 @@ def temporary_seed(seed: int):
     np_state = np.random.get_state()
     torch_state = torch.random.get_rng_state()
     cuda_states = None
+    
+    # Only access CUDA in main process to avoid fork issues on Linux DataLoader workers
     if torch.cuda.is_available():
-        cuda_states = torch.cuda.get_rng_state_all()
+        try:
+            cuda_states = torch.cuda.get_rng_state_all()
+        except RuntimeError:
+            # CUDA not initialized in this process (worker process)
+            pass
 
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+        try:
+            torch.cuda.manual_seed_all(seed)
+        except RuntimeError:
+            pass
 
     try:
         yield
@@ -61,4 +70,7 @@ def temporary_seed(seed: int):
         np.random.set_state(np_state)
         torch.random.set_rng_state(torch_state)
         if cuda_states is not None:
-            torch.cuda.set_rng_state_all(cuda_states)
+            try:
+                torch.cuda.set_rng_state_all(cuda_states)
+            except RuntimeError:
+                pass
