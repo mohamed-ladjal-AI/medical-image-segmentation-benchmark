@@ -1,0 +1,6 @@
+{
+  "lr": 7e-4,
+  "weight_decay": 1e-5,
+  "optimizer_name": "AdamW",
+  "encoder_name": "resnet34"
+}

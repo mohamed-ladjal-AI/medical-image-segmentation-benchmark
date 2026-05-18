@@ -1,0 +1,6 @@
+{
+  "lr": 3e-4,
+  "weight_decay": 1e-5,
+  "optimizer_name": "AdamW",
+  "model_name": "segformer.b0.512x512"
+}
