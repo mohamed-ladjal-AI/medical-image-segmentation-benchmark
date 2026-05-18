@@ -7,7 +7,7 @@ TWO USAGE MODES
 ───────────────
 A. Live in-training  (called from run_benchmark.py after every epoch)
    plot_training_curves(model_name, epoch_logs, output_dir)
-   Writes two PDFs to <exp_dir>/plots/ and overwrites them each epoch so
+    Writes five PDFs to <exp_dir>/plots/ and overwrites them each epoch so
    you can watch training progress in real-time in any PDF viewer.
 
 B. Post-hoc CLI  (run after training is complete)
@@ -139,9 +139,10 @@ def plot_training_curves(
     model_name: str,
     epoch_logs: Dict[str, List[float]],
     output_dir: Path,
+    epoch_records: Optional[List[Dict[str, float]]] = None,
 ) -> None:
     """
-    Regenerate and overwrite the two live training-progress figures.
+    Regenerate and overwrite the live training-progress figures.
 
     Parameters
     ----------
@@ -153,11 +154,17 @@ def plot_training_curves(
                     ``val_fp_area``, ``val_plaque_area_err``
     output_dir  : destination folder, usually ``<exp_dir>/plots/``.
                   Created automatically if absent.
+    epoch_records: optional list of per-image validation dictionaries for the
+                   current epoch. When provided, figures 3–5 are also updated
+                   from this live validation set.
 
     Output files (overwritten every epoch)
     ---------------------------------------
     fig1_convergence.pdf        — Train vs. Val loss with best-epoch marker
     fig2_metrics_dashboard.pdf  — 2×3 grid of all tracked val metrics
+    fig3_robustness_profile.pdf — Per-image Dice distribution for this epoch
+    fig4_geometric_scatter.pdf  — Dice vs. HD95 scatter for this epoch
+    fig5_area_quantification.pdf — GT vs. predicted area scatter for this epoch
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -252,6 +259,12 @@ def plot_training_curves(
     )
     fig.tight_layout()
     _save(fig, output_dir / f"fig2_metrics_dashboard{_FIG_EXT}")
+
+    if epoch_records:
+        live_test_data = {model_name: epoch_records}
+        fig3_robustness_profile(live_test_data, output_dir)
+        fig4_geometric_scatter(live_test_data, output_dir)
+        fig5_area_quantification(live_test_data, output_dir)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

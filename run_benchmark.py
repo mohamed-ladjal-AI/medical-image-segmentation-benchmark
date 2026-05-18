@@ -14,6 +14,7 @@ from tqdm import tqdm
 from src.dataset import CarotidPlaqueDataset
 from src.losses import HybridLoss
 from src.metrics import evaluate_batch          # ← updated import
+from src.generate_plots import plot_training_curves
 from src.repro import set_seed, seed_worker
 
 def main():
@@ -194,6 +195,16 @@ def main():
     # 5. UNIFIED TRAINING & VALIDATION ENGINE
     # ==========================================
     best_val_dice = 0.0
+    epoch_logs = {
+        'train_loss': [],
+        'val_loss': [],
+        'val_dice': [],
+        'val_iou': [],
+        'val_hd95': [],
+        'val_nsd': [],
+        'val_fp_area': [],
+        'val_plaque_area_err': [],
+    }
 
     for epoch in range(args.epochs):
         train_dataset.set_epoch(epoch)
@@ -258,6 +269,15 @@ def main():
         median_fp   = float(np.nanmedian(fp_vals))
         mean_pae    = float(np.nanmean(pae_vals))
 
+        epoch_logs['train_loss'].append(avg_train_loss)
+        epoch_logs['val_loss'].append(avg_val_loss)
+        epoch_logs['val_dice'].append(mean_dice)
+        epoch_logs['val_iou'].append(mean_iou)
+        epoch_logs['val_hd95'].append(mean_hd95)
+        epoch_logs['val_nsd'].append(mean_nsd)
+        epoch_logs['val_fp_area'].append(median_fp)
+        epoch_logs['val_plaque_area_err'].append(mean_pae)
+
         # ── Console summary ───────────────────────────────────────────────
         print(f"📊 Epoch {epoch+1} → Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
         print(f"   Overlap  — Dice: {mean_dice:.4f} | IoU: {mean_iou:.4f}")
@@ -273,6 +293,9 @@ def main():
         writer.add_scalar('metrics/mean_nsd',            mean_nsd,       epoch + 1)
         writer.add_scalar('metrics/median_fp_area',      median_fp,      epoch + 1)
         writer.add_scalar('metrics/mean_plaque_area_err',mean_pae,       epoch + 1)
+
+        # ── Live plots (overwritten each epoch) ─────────────────────────
+        plot_training_curves(args.model, epoch_logs, exp_dir / 'plots', all_per_image)
 
         # ── Checkpoint (best Dice) ────────────────────────────────────────
         if mean_dice > best_val_dice:
