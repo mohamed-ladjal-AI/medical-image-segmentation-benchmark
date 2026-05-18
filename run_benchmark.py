@@ -13,7 +13,7 @@ from tqdm import tqdm
 # Import local global assets
 from src.dataset import CarotidPlaqueDataset
 from src.losses import HybridLoss
-from src.metrics import calculate_metrics
+from src.metrics import evaluate_batch          # ← updated import
 from src.repro import set_seed, seed_worker
 
 def main():
@@ -58,7 +58,6 @@ def main():
     # ==========================================
     # 1. FIXED PRE-PROCESSING & AUGMENTATIONS
     # ==========================================
-    # Use centralized augmentation helper to keep run script small
     from src.data_augmentation import get_transforms
 
     train_transform, val_transform = get_transforms(input_size=512)
@@ -66,12 +65,10 @@ def main():
     # ==========================================
     # 2. STANDARDIZED DATA LOADING
     # ==========================================
-    # If an explicit validation folder exists, use it. Otherwise split 10% from train.
     train_dir = Path("dataset/train")
     if not train_dir.exists():
         raise FileNotFoundError("dataset/train does not exist. Please provide training data in dataset/train")
 
-    # No explicit validation folder requested; deterministically split from train and save/load the split
     all_files = sorted([
         f for f in os.listdir(train_dir)
         if "_labeled" not in f and f.lower().endswith(('.png', '.jpg', '.jpeg'))
@@ -79,7 +76,6 @@ def main():
     if len(all_files) == 0:
         raise FileNotFoundError("No training images found in dataset/train")
 
-    # Determine canonical split file path
     if args.split_file:
         split_path = Path(args.split_file)
     else:
@@ -87,7 +83,6 @@ def main():
         split_dir.mkdir(parents=True, exist_ok=True)
         split_path = split_dir / f"split_seed{args.seed}.json"
 
-    # Validate split ratio
     if not (0.0 < args.split_ratio < 0.5):
         raise ValueError("--split_ratio must be between 0 and 0.5 (exclusive)")
 
@@ -123,7 +118,6 @@ def main():
         filenames=val_files,
     )
 
-    # Deterministic DataLoader generator
     g = torch.Generator()
     g.manual_seed(args.seed)
 
@@ -135,10 +129,10 @@ def main():
         val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True,
         worker_init_fn=seed_worker
     )
+
     # ==========================================
     # 3. LOAD HYPERPARAMETERS BEFORE MODEL INSTANTIATION
     # ==========================================
-    # Load hyperparameters first so architecture decisions use correct config
     hyperparameter_config = {}
     if args.hyperparameter:
         hyper_path = Path(args.hyperparameter)
@@ -155,7 +149,6 @@ def main():
     # ==========================================
     print(f"📦 Loading architecture pipeline: {args.model}")
     
-    # Import the respective factory function dynamically based on runtime choices
     if args.model == "unet":
         from pipelines.unet.model import get_model
     elif args.model == "unet_plus_plus":
@@ -171,18 +164,14 @@ def main():
     elif args.model == "my_network":
         from pipelines.my_network.model import get_model
 
-    # Instantiate model with hyperparameter config passed in
     model, config = get_model(config_override=hyperparameter_config if hyperparameter_config else None)
     model = model.to(device)
 
-    # Save model-specific config
     with open(exp_dir / 'model_config.json', 'w') as f:
         json.dump(config, f, indent=2)
 
-    # Standardized Loss Function
     criterion = HybridLoss()
 
-    # Dynamic Optimization (using tuned hyperparameters, but structured identical framework)
     optimizer_name = config.get("optimizer_name", "AdamW")
     optimizer_map = {
         "AdamW": torch.optim.AdamW,
@@ -212,14 +201,13 @@ def main():
         model.train()
         train_loss = 0.0
         
-        # Training Cycle
+        # ── Training Cycle ────────────────────────────────────────────────
         train_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs} [Train]")
         for images, masks in train_bar:
             images, masks = images.to(device), masks.to(device)
             
             optimizer.zero_grad()
             outputs = model(images)
-            
             loss = criterion(outputs, masks)
             loss.backward()
             optimizer.step()
@@ -227,41 +215,66 @@ def main():
             train_loss += loss.item()
             train_bar.set_postfix({"Loss": f"{loss.item():.4f}"})
 
-        # Validation Cycle
+        # ── Validation Cycle ──────────────────────────────────────────────
         model.eval()
         val_loss = 0.0
-        all_dice = []
-        all_fp_areas = []
+        all_per_image = []   # accumulates one dict per image across all batches
 
         with torch.no_grad():
             for images, masks in val_loader:
                 images, masks = images.to(device), masks.to(device)
+
                 outputs = model(images)
-                
-                loss = criterion(outputs, masks)
-                val_loss += loss.item()
-                
-                # Global metrics parser execution
-                batch_dice, batch_fp = calculate_metrics(outputs, masks)
-                all_dice.extend(batch_dice)
-                all_fp_areas.extend(batch_fp)
+                val_loss += criterion(outputs, masks).item()
 
-        # Average results
+                # evaluate_batch returns (per_image_list, aggregates_dict)
+                # We only need per_image here; epoch-level aggregation is done below.
+                per_image, _ = evaluate_batch(outputs, masks)
+                all_per_image.extend(per_image)
+
+        # ── Epoch-level aggregation (subject-wise) ────────────────────────
+        def _collect(key, plaque_only=False):
+            vals = [
+                m[key] for m in all_per_image
+                if (not plaque_only or m['has_plaque'])
+                and not np.isnan(m[key])
+            ]
+            return np.asarray(vals, dtype=float) if vals else np.array([np.nan])
+
+        dice_vals  = _collect('dice',              plaque_only=True)
+        iou_vals   = _collect('iou',               plaque_only=True)
+        hd95_vals  = _collect('hd95',              plaque_only=True)
+        nsd_vals   = _collect('nsd',               plaque_only=True)
+        fp_vals    = _collect('fp_area',           plaque_only=False)
+        pae_vals   = _collect('plaque_area_error', plaque_only=False)
+
         avg_train_loss = train_loss / len(train_loader)
-        avg_val_loss = val_loss / len(val_loader)
-        mean_dice = np.mean(all_dice) if len(all_dice) > 0 else 0.0
-        median_fp = np.median(all_fp_areas) if len(all_fp_areas) > 0 else 0.0
+        avg_val_loss   = val_loss   / len(val_loader)
 
-        print(f"📊 Summary Epoch {epoch+1} -> Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
-        print(f"   ✨ Plaque Images Mean Dice: {mean_dice:.4f} | Healthy Images Median FP Area: {median_fp:.4f} mm²\n")
+        mean_dice   = float(np.nanmean(dice_vals))
+        mean_iou    = float(np.nanmean(iou_vals))
+        mean_hd95   = float(np.nanmean(hd95_vals))
+        mean_nsd    = float(np.nanmean(nsd_vals))
+        median_fp   = float(np.nanmedian(fp_vals))
+        mean_pae    = float(np.nanmean(pae_vals))
 
-        # Log to TensorBoard
-        writer.add_scalar('loss/train', avg_train_loss, epoch+1)
-        writer.add_scalar('loss/val', avg_val_loss, epoch+1)
-        writer.add_scalar('metrics/mean_dice', float(mean_dice), epoch+1)
-        writer.add_scalar('metrics/median_fp_area', float(median_fp), epoch+1)
+        # ── Console summary ───────────────────────────────────────────────
+        print(f"📊 Epoch {epoch+1} → Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
+        print(f"   Overlap  — Dice: {mean_dice:.4f} | IoU: {mean_iou:.4f}")
+        print(f"   Boundary — HD95: {mean_hd95:.4f} px | NSD: {mean_nsd:.4f}")
+        print(f"   Clinical — Median FP Area: {median_fp:.4f} mm² | Mean Plaque Area Error: {mean_pae:.4f} mm²\n")
 
-        # Checkpoint Saving Layer
+        # ── TensorBoard ───────────────────────────────────────────────────
+        writer.add_scalar('loss/train',                  avg_train_loss, epoch + 1)
+        writer.add_scalar('loss/val',                    avg_val_loss,   epoch + 1)
+        writer.add_scalar('metrics/mean_dice',           mean_dice,      epoch + 1)
+        writer.add_scalar('metrics/mean_iou',            mean_iou,       epoch + 1)
+        writer.add_scalar('metrics/mean_hd95',           mean_hd95,      epoch + 1)
+        writer.add_scalar('metrics/mean_nsd',            mean_nsd,       epoch + 1)
+        writer.add_scalar('metrics/median_fp_area',      median_fp,      epoch + 1)
+        writer.add_scalar('metrics/mean_plaque_area_err',mean_pae,       epoch + 1)
+
+        # ── Checkpoint (best Dice) ────────────────────────────────────────
         if mean_dice > best_val_dice:
             best_val_dice = mean_dice
             save_path = exp_dir / 'best_weights.pth'
@@ -271,13 +284,12 @@ def main():
                 'optimizer_state_dict': optimizer.state_dict(),
                 'best_dice': best_val_dice,
             }, str(save_path))
-            print(f"💾 New best model saved to {save_path}!")
+            print(f"💾 New best model saved to {save_path}!\n")
 
-    # Finalize
+    # ── Finalise ──────────────────────────────────────────────────────────
     writer.flush()
     writer.close()
 
-    # Save a final run summary
     summary = {
         'best_val_dice': float(best_val_dice),
         'epochs': args.epochs,
@@ -285,6 +297,7 @@ def main():
     }
     with open(exp_dir / 'run_summary.json', 'w') as f:
         json.dump(summary, f, indent=2)
+
 
 if __name__ == "__main__":
     main()
