@@ -91,6 +91,9 @@ def get_hyperparameter_suggester(model_name):
     return suggest_hyperparameters
 
 def objective(trial, args, train_loader, val_loader, device):
+    # Clear cache before starting a trial
+    torch.cuda.empty_cache()
+    
     suggester = get_hyperparameter_suggester(args.model)
     config = suggester(trial)
     
@@ -106,6 +109,7 @@ def objective(trial, args, train_loader, val_loader, device):
     optimizer_name = config.get("optimizer_name", "AdamW")
     
     optimizer = get_optimizer(optimizer_name, model.parameters(), lr, weight_decay)
+    scaler = torch.cuda.amp.GradScaler() # mixed precision scaler
     
     best_val_dice = 0.0
     
@@ -118,10 +122,15 @@ def objective(trial, args, train_loader, val_loader, device):
             images, masks = images.to(device), masks.to(device)
             
             optimizer.zero_grad()
-            outputs = model(images)
-            loss = criterion(outputs, masks)
-            loss.backward()
-            optimizer.step()
+            
+            # Autocast for mixed precision
+            with torch.cuda.amp.autocast():
+                outputs = model(images)
+                loss = criterion(outputs, masks)
+                
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             
         # Validation
         val_loader.dataset.set_epoch(epoch)
