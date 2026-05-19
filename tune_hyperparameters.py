@@ -1,0 +1,221 @@
+import argparse
+import os
+import torch
+import json
+import optuna
+from pathlib import Path
+from torch.utils.data import DataLoader
+import numpy as np
+from tqdm import tqdm
+
+from src.dataset import CarotidPlaqueDataset
+from src.losses import HybridLoss
+from src.metrics import evaluate_batch
+from src.data_augmentation import get_transforms
+from src.repro import set_seed, seed_worker
+
+def generate_split(seed, split_ratio=0.10):
+    train_dir = Path("dataset/train")
+    all_files = sorted([
+        f for f in os.listdir(train_dir)
+        if "_labeled" not in f and f.lower().endswith(('.png', '.jpg', '.jpeg'))
+    ])
+    
+    split_dir = Path("dataset/splits")
+    split_dir.mkdir(parents=True, exist_ok=True)
+    split_path = split_dir / f"split_seed{seed}.json"
+    
+    if split_path.exists():
+        with open(split_path, 'r') as f:
+            saved = json.load(f)
+        return saved.get('train', []), saved.get('val', [])
+        
+    import random as _random
+    rnd = _random.Random(seed)
+    files = list(all_files)
+    rnd.shuffle(files)
+    val_count = max(1, int(len(files) * split_ratio))
+    val_files = files[:val_count]
+    train_files = files[val_count:]
+
+    with open(split_path, 'w') as f:
+        json.dump({'train': train_files, 'val': val_files}, f, indent=2)
+    return train_files, val_files
+
+def get_model_function(model_name):
+    if model_name == "unet":
+        from pipelines.unet.model import get_model
+    elif model_name == "unet_plus_plus":
+        from pipelines.unet_plus_plus.model import get_model
+    elif model_name == "attention_unet":
+        from pipelines.attention_unet.model import get_model
+    elif model_name == "deeplabv3_plus":
+        from pipelines.deeplabv3_plus.model import get_model
+    elif model_name == "hrnet":
+        from pipelines.hrnet.model import get_model
+    elif model_name == "segformer":
+        from pipelines.segformer.model import get_model
+    elif model_name == "my_network":
+        from pipelines.my_network.model import get_model
+    else:
+        raise ValueError(f"Unknown model architecture: {model_name}")
+    return get_model
+
+def get_optimizer(optimizer_name, params, lr, weight_decay):
+    if optimizer_name == "AdamW":
+        return torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
+    elif optimizer_name == "Adam":
+        return torch.optim.Adam(params, lr=lr, weight_decay=weight_decay)
+    elif optimizer_name == "SGD":
+        return torch.optim.SGD(params, lr=lr, weight_decay=weight_decay, momentum=0.9)
+    else:
+        raise ValueError(f"Unknown optimizer: {optimizer_name}")
+
+def get_hyperparameter_suggester(model_name):
+    if model_name == "unet":
+        from pipelines.unet.tune import suggest_hyperparameters
+    elif model_name == "unet_plus_plus":
+        from pipelines.unet_plus_plus.tune import suggest_hyperparameters
+    elif model_name == "attention_unet":
+        from pipelines.attention_unet.tune import suggest_hyperparameters
+    elif model_name == "deeplabv3_plus":
+        from pipelines.deeplabv3_plus.tune import suggest_hyperparameters
+    elif model_name == "hrnet":
+        from pipelines.hrnet.tune import suggest_hyperparameters
+    elif model_name == "segformer":
+        from pipelines.segformer.tune import suggest_hyperparameters
+    elif model_name == "my_network":
+        from pipelines.my_network.tune import suggest_hyperparameters
+    else:
+        raise ValueError(f"Unknown model architecture: {model_name}")
+    return suggest_hyperparameters
+
+def objective(trial, args, train_loader, val_loader, device):
+    suggester = get_hyperparameter_suggester(args.model)
+    config = suggester(trial)
+    
+    # Get model with the proposed config
+    model_fn = get_model_function(args.model)
+    model, _ = model_fn(config_override=config)
+    model = model.to(device)
+    
+    criterion = HybridLoss()
+    
+    lr = config.get("lr", 1e-4)
+    weight_decay = config.get("weight_decay", 1e-5)
+    optimizer_name = config.get("optimizer_name", "AdamW")
+    
+    optimizer = get_optimizer(optimizer_name, model.parameters(), lr, weight_decay)
+    
+    best_val_dice = 0.0
+    
+    epochs = args.epochs
+    for epoch in range(epochs):
+        train_loader.dataset.set_epoch(epoch)
+        model.train()
+        
+        for images, masks in train_loader:
+            images, masks = images.to(device), masks.to(device)
+            
+            optimizer.zero_grad()
+            outputs = model(images)
+            loss = criterion(outputs, masks)
+            loss.backward()
+            optimizer.step()
+            
+        # Validation
+        val_loader.dataset.set_epoch(epoch)
+        model.eval()
+        all_per_image = []
+        
+        with torch.no_grad():
+            for images, masks in val_loader:
+                images, masks = images.to(device), masks.to(device)
+                outputs = model(images)
+                per_image, _ = evaluate_batch(outputs, masks)
+                all_per_image.extend(per_image)
+                
+        # Calculate metric
+        dice_vals = [m['dice'] for m in all_per_image if m['has_plaque'] and not np.isnan(m['dice'])]
+        mean_dice = float(np.nanmean(dice_vals)) if dice_vals else 0.0
+        
+        if mean_dice > best_val_dice:
+            best_val_dice = mean_dice
+            
+        trial.report(mean_dice, epoch)
+        
+        if trial.should_prune():
+            raise optuna.exceptions.TrialPruned()
+            
+    return best_val_dice
+
+def main():
+    parser = argparse.ArgumentParser(description="Hyperparameter tuning with Optuna")
+    parser.add_argument("--model", type=str, required=True, 
+                        choices=["unet", "unet_plus_plus", "attention_unet", "deeplabv3_plus", "hrnet", "segformer", "my_network"],
+                        help="Specify which architecture to tune.")
+    parser.add_argument("--n_trials", type=int, default=20, help="Number of Optuna trials.")
+    parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs per trial.")
+    parser.add_argument("--batch_size", type=int, default=8, help="Batch size.")
+    parser.add_argument("--seed", type=int, default=42, help="Seed.")
+    args = parser.parse_args()
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"🖥️  Using Execution Device for Tuning: {device}")
+
+    set_seed(args.seed)
+
+    train_files, val_files = generate_split(args.seed)
+    
+    train_transform, val_transform = get_transforms(input_size=512)
+    
+    train_dataset = CarotidPlaqueDataset(
+        data_dir="dataset/train",
+        transform=train_transform,
+        seed=args.seed,
+        filenames=train_files,
+    )
+    val_dataset = CarotidPlaqueDataset(
+        data_dir="dataset/train", 
+        transform=val_transform,
+        seed=args.seed,
+        filenames=val_files,
+    )
+
+    g = torch.Generator()
+    g.manual_seed(args.seed)
+
+    train_loader = DataLoader(
+        train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True,
+        worker_init_fn=seed_worker, generator=g
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True,
+        worker_init_fn=seed_worker
+    )
+
+    study = optuna.create_study(direction="maximize", study_name=f"{args.model}_tuning")
+    
+    def wrapped_objective(trial):
+        return objective(trial, args, train_loader, val_loader, device)
+
+    study.optimize(wrapped_objective, n_trials=args.n_trials)
+
+    print("=========================================================")
+    print("Tuning Completed!")
+    print("Best Trial:")
+    print(f"  Value (Dice): {study.best_trial.value}")
+    print("  Params: ")
+    for k, v in study.best_trial.params.items():
+        print(f"    {k}: {v}")
+
+    # Save to config file
+    config_path = Path(f"pipelines/{args.model}/config.json")
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    with open(config_path, "w") as f:
+        json.dump(study.best_trial.params, f, indent=2)
+    print(f"💾 Best hyperparameters saved to: {config_path}")
+
+if __name__ == "__main__":
+    main()

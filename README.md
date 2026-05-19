@@ -22,12 +22,11 @@ If `--hyperparameter` is omitted, the training will use default hyperparameters 
 
 ### Hyperparameter Tuning
 
-Each model's `tune.py` script runs Optuna to find optimal hyperparameters. After tuning completes, update the respective `config.json`:
+We provide a unified script to run Optuna to find optimal hyperparameters for a given model. After tuning completes, it automatically updates the respective `config.json`:
 
 ```bash
-cd pipelines/unet
-python tune.py  # Outputs optimal hyperparameters
-# Copy the best trial's config to config.json
+python tune_hyperparameters.py --model unet --n_trials 20 --epochs 10
+# Best params are auto-saved to pipelines/unet/config.json
 ```
 
 Each `config.json` should contain:
