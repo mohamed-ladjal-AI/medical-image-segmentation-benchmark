@@ -173,14 +173,28 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Seed.")
     args = parser.parse_args()
 
+    print("\n" + "="*70)
+    print("🔧 HYPERPARAMETER TUNING WITH OPTUNA")
+    print("="*70)
+    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"🖥️  Using Execution Device for Tuning: {device}")
+    print(f"\n🖥️  Device: {device}")
+    print(f"📦 Model: {args.model}")
+    print(f"🔁 Trials: {args.n_trials}")
+    print(f"📚 Epochs per trial: {args.epochs}")
+    print(f"📊 Batch size: {args.batch_size}")
+    print(f"🌱 Seed: {args.seed}\n")
 
     set_seed(args.seed)
 
+    print("📋 Preparing dataset split...")
     train_files, val_files = generate_split(args.seed)
+    print(f"   ✓ Train samples: {len(train_files)}")
+    print(f"   ✓ Val samples: {len(val_files)}\n")
     
+    print("🖼️  Loading data augmentations...")
     train_transform, val_transform = get_transforms(input_size=512)
+    print(f"   ✓ Augmentations loaded\n")
     
     train_dataset = CarotidPlaqueDataset(
         data_dir="dataset/train",
@@ -207,20 +221,31 @@ def main():
         worker_init_fn=seed_worker
     )
 
+    print("⚡ Creating Optuna study...")
     study = optuna.create_study(direction="maximize", study_name=f"{args.model}_tuning")
+    print(f"   ✓ Study name: {study.study_name}\n")
+    
+    print("🔍 Starting hyperparameter optimization...")
+    print("-" * 70)
     
     def wrapped_objective(trial):
         return objective(trial, args, train_loader, val_loader, device)
 
     study.optimize(wrapped_objective, n_trials=args.n_trials)
 
-    print("=========================================================")
-    print("Tuning Completed!")
-    print("Best Trial:")
-    print(f"  Value (Dice): {study.best_trial.value}")
-    print("  Params: ")
-    for k, v in study.best_trial.params.items():
-        print(f"    {k}: {v}")
+    print("-" * 70)
+    print("\n✨ TUNING COMPLETED!\n")
+    
+    print("🏆 Best Trial Results:")
+    print("-" * 70)
+    print(f"Trial Number: {study.best_trial.number}")
+    print(f"Best Dice Score: {study.best_trial.value:.6f}\n")
+    
+    print("Optimized Hyperparameters:")
+    print("-" * 70)
+    for key, value in study.best_trial.params.items():
+        print(f"  {key:.<30} {value}")
+    print("-" * 70 + "\n")
 
     # Save to config file
     config_path = Path(f"pipelines/{args.model}/config.json")
@@ -228,7 +253,9 @@ def main():
     
     with open(config_path, "w") as f:
         json.dump(study.best_trial.params, f, indent=2)
-    print(f"💾 Best hyperparameters saved to: {config_path}")
+    
+    print(f"💾 Configuration saved: {config_path}\n")
+    print("="*70 + "\n")
 
 if __name__ == "__main__":
     main()
