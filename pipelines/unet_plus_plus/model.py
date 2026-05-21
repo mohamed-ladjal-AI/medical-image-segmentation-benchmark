@@ -25,7 +25,7 @@ def get_model(config_override=None):
         encoder_weights="imagenet",
         in_channels=1,
         classes=1,
-        activation="sigmoid"
+        activation=None                  # Return raw logits (sigmoid applied in loss only)
     )
     print(f"✅ Pretrained U-Net++ loaded successfully: {chosen_encoder} (encoder_weights=imagenet)")
     return model, config

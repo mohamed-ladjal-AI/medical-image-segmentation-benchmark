@@ -38,7 +38,7 @@ def get_model(config_override=None):
         encoder_weights="imagenet",      # Download pre-trained ImageNet weights automatically
         in_channels=1,                   # 1 channel because your ultrasound images are grayscale
         classes=1,                       # 1 class output for binary plaque mask
-        activation="sigmoid"             # Squashes pixel outputs between 0.0 and 1.0
+        activation=None                  # Return raw logits (sigmoid applied in loss only)
     )
 
     print(f"✅ Pretrained encoder loaded successfully: {chosen_encoder} (encoder_weights=imagenet)")

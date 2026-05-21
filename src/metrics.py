@@ -22,6 +22,8 @@ from scipy.ndimage import binary_erosion
 
 
 def _binarize(tensor: torch.Tensor, thr: float = 0.5) -> np.ndarray:
+    # Apply sigmoid to convert logits to probabilities for threshold-based binarization
+    tensor = torch.sigmoid(tensor)
     arr = tensor.detach().cpu().numpy()
     if arr.ndim == 4:  # [B, C, H, W]
         arr = arr[:, 0]

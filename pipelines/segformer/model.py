@@ -32,8 +32,9 @@ def get_model(config_override=None):
         def forward(self, x):
             outputs = super().forward(pixel_values=x)
             # Upsample logits to match original 512x512 resolution
+            # Return raw logits (sigmoid applied in loss only for AMP compatibility)
             import torch.nn.functional as F
-            return torch.sigmoid(F.interpolate(outputs.logits, size=x.shape[2:], mode="bilinear", align_corners=False))
+            return F.interpolate(outputs.logits, size=x.shape[2:], mode="bilinear", align_corners=False)
 
     model.__class__ = SegformerWrapper
     print(f"✅ Vision Transformer SegFormer loaded successfully: {chosen_backbone}")
