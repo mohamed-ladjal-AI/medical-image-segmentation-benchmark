@@ -118,7 +118,8 @@ def objective(trial, args, train_loader, val_loader, device):
         train_loader.dataset.set_epoch(epoch)
         model.train()
         
-        for images, masks in train_loader:
+        train_bar = tqdm(train_loader, desc=f"Trial {trial.number} Epoch {epoch+1}/{epochs} [Train]", leave=False)
+        for images, masks in train_bar:
             images, masks = images.to(device), masks.to(device)
             
             optimizer.zero_grad()
@@ -132,13 +133,16 @@ def objective(trial, args, train_loader, val_loader, device):
             scaler.step(optimizer)
             scaler.update()
             
+            train_bar.set_postfix({"loss": f"{loss.item():.4f}"})
+            
         # Validation
         val_loader.dataset.set_epoch(epoch)
         model.eval()
         all_per_image = []
         
+        val_bar = tqdm(val_loader, desc=f"Trial {trial.number} Epoch {epoch+1}/{epochs} [Val]", leave=False)
         with torch.no_grad():
-            for images, masks in val_loader:
+            for images, masks in val_bar:
                 images, masks = images.to(device), masks.to(device)
                 outputs = model(images)
                 per_image, _ = evaluate_batch(outputs, masks)
