@@ -18,7 +18,7 @@ do
   python tune_hyperparameters.py \
     --model $model \
     --n_trials 60 \
-    --epochs 10 \
+    --epochs 5 \
     --batch_size 8
 
 done
