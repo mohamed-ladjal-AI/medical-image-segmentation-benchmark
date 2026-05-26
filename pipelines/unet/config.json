@@ -1,6 +1,7 @@
 {
-  "lr": 3e-4,
-  "weight_decay": 1e-5,
+  "lr": 7.723774314777839e-05,
+  "weight_decay": 2.9005927099755053e-06,
   "optimizer_name": "AdamW",
-  "encoder_name": "resnet34"
+  "encoder_name": "resnet50"
 }
+

@@ -14,33 +14,20 @@ from src.metrics import evaluate_batch
 from src.data_augmentation import get_transforms
 from src.repro import set_seed, seed_worker
 
-def generate_split(seed, split_ratio=0.10):
-    train_dir = Path("dataset/train")
-    all_files = sorted([
-        f for f in os.listdir(train_dir)
-        if "_labeled" not in f and f.lower().endswith(('.png', '.jpg', '.jpeg'))
-    ])
-    
-    split_dir = Path("dataset/splits")
-    split_dir.mkdir(parents=True, exist_ok=True)
-    split_path = split_dir / f"split_seed{seed}.json"
-    
-    if split_path.exists():
-        with open(split_path, 'r') as f:
-            saved = json.load(f)
-        return saved.get('train', []), saved.get('val', [])
-        
-    import random as _random
-    rnd = _random.Random(seed)
-    files = list(all_files)
-    rnd.shuffle(files)
-    val_count = max(1, int(len(files) * split_ratio))
-    val_files = files[:val_count]
-    train_files = files[val_count:]
+FIXED_SEED = 123
+FIXED_SPLIT_PATH = Path("dataset/splits/split_seed123.json")
 
-    with open(split_path, 'w') as f:
-        json.dump({'train': train_files, 'val': val_files}, f, indent=2)
-    return train_files, val_files
+
+def load_fixed_split():
+    if not FIXED_SPLIT_PATH.exists():
+        raise FileNotFoundError(
+            f"Expected split file not found: {FIXED_SPLIT_PATH}"
+        )
+
+    with open(FIXED_SPLIT_PATH, "r") as f:
+        saved = json.load(f)
+
+    return saved.get("train", []), saved.get("val", [])
 
 def get_model_function(model_name):
     if model_name == "unet":
@@ -170,7 +157,7 @@ def main():
     parser.add_argument("--n_trials", type=int, default=20, help="Number of Optuna trials.")
     parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs per trial.")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size.")
-    parser.add_argument("--seed", type=int, default=42, help="Seed.")
+    parser.add_argument("--seed", type=int, default=FIXED_SEED, help="Seed. Fixed to 123 for fair comparison across models.")
     args = parser.parse_args()
 
     print("\n" + "="*70)
@@ -183,12 +170,15 @@ def main():
     print(f"🔁 Trials: {args.n_trials}")
     print(f"📚 Epochs per trial: {args.epochs}")
     print(f"📊 Batch size: {args.batch_size}")
-    print(f"🌱 Seed: {args.seed}\n")
+    print(f"🌱 Seed: {FIXED_SEED} (fixed for fair comparison)\n")
 
-    set_seed(args.seed)
+    if args.seed != FIXED_SEED:
+        print(f"⚠️  Overriding --seed {args.seed} with fixed seed {FIXED_SEED} for fair comparison.\n")
 
-    print("📋 Preparing dataset split...")
-    train_files, val_files = generate_split(args.seed)
+    set_seed(FIXED_SEED)
+
+    print("📋 Loading fixed dataset split...")
+    train_files, val_files = load_fixed_split()
     print(f"   ✓ Train samples: {len(train_files)}")
     print(f"   ✓ Val samples: {len(val_files)}\n")
     
@@ -199,18 +189,18 @@ def main():
     train_dataset = CarotidPlaqueDataset(
         data_dir="dataset/train",
         transform=train_transform,
-        seed=args.seed,
+        seed=FIXED_SEED,
         filenames=train_files,
     )
     val_dataset = CarotidPlaqueDataset(
         data_dir="dataset/train", 
         transform=val_transform,
-        seed=args.seed,
+        seed=FIXED_SEED,
         filenames=val_files,
     )
 
     g = torch.Generator()
-    g.manual_seed(args.seed)
+    g.manual_seed(FIXED_SEED)
 
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True,
@@ -222,7 +212,7 @@ def main():
     )
 
     print("⚡ Creating Optuna study...")
-    study = optuna.create_study(direction="maximize", study_name=f"{args.model}_tuning")
+    study = optuna.create_study(direction="maximize", study_name=f"{args.model}_tuning_seed{FIXED_SEED}")
     print(f"   ✓ Study name: {study.study_name}\n")
     
     print("🔍 Starting hyperparameter optimization...")
