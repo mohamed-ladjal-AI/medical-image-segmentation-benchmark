@@ -155,7 +155,7 @@ def main():
                         choices=["unet", "unet_plus_plus", "attention_unet", "deeplabv3_plus", "hrnet", "segformer", "my_network"],
                         help="Specify which architecture to tune.")
     parser.add_argument("--n_trials", type=int, default=20, help="Number of Optuna trials.")
-    parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs per trial.")
+    parser.add_argument("--epochs", type=int, default=5, help="Number of training epochs per trial.")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size.")
     parser.add_argument("--seed", type=int, default=FIXED_SEED, help="Seed. Fixed to 123 for fair comparison across models.")
     args = parser.parse_args()
