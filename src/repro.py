@@ -1,3 +1,4 @@
+import os
 import random
 from contextlib import contextmanager
 
@@ -9,15 +10,29 @@ def set_seed(seed: int):
     """Set seeds for python, numpy and torch for reproducible runs.
 
     This also configures cuDNN to be deterministic where possible.
+    On CUDA >= 10.2, the environment variable CUBLAS_WORKSPACE_CONFIG
+    must be set before enabling deterministic algorithms; this function
+    sets it automatically if it is not already present.
     """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-    # Configure deterministic algorithms where available
+    # On CUDA >= 10.2, torch.use_deterministic_algorithms(True) requires
+    # CUBLAS_WORKSPACE_CONFIG to be set or a RuntimeError is raised.
+    if "CUBLAS_WORKSPACE_CONFIG" not in os.environ:
+        try:
+            os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+        except Exception:
+            pass
+
     try:
         torch.use_deterministic_algorithms(True)
+    except RuntimeError as e:
+        print(f"⚠️  Deterministic algorithms unavailable: {e}")
+        print("   Training will proceed without full determinism.")
+        print(f"   To fix, set: CUBLAS_WORKSPACE_CONFIG=:4096:8")
     except Exception:
         # Older torch versions don't have this API
         pass

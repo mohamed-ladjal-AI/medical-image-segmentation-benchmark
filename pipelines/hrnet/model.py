@@ -15,11 +15,11 @@ def get_model(config_override=None):
         else:
             print("⚠️ No Optuna profile found. Utilizing baseline defaults.")
             config = {
-                "lr": 2e-4, "weight_decay": 1e-5, "optimizer_name": "AdamW", "encoder_name": "hrnet_w32"
+                "lr": 2e-4, "weight_decay": 1e-5, "optimizer_name": "AdamW", "encoder_name": "timm-hrnet_w32"
             }
 
-    chosen_encoder = config.get("encoder_name", "hrnet_w32") # Optuna handles hrnet_w32 or hrnet_w48
-    
+    chosen_encoder = config.get("encoder_name", "timm-hrnet_w32") # Optuna handles hrnet_w32 or hrnet_w48
+
     model = smp.Unet(
         encoder_name=chosen_encoder,
         encoder_weights="imagenet",
